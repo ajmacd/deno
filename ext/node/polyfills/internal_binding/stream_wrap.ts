@@ -127,6 +127,7 @@ export class LibuvStreamWrap extends HandleWrap {
 
   reading!: boolean;
   #reading = false;
+  #readInFlight = false;
   destroyed = false;
   writeQueueSize = 0;
   bytesRead = 0;
@@ -150,7 +151,12 @@ export class LibuvStreamWrap extends HandleWrap {
   readStart(): number {
     if (!this.#reading) {
       this.#reading = true;
-      this.#read();
+      // Only start a new read loop if one isn't already in flight.
+      // An in-flight read from before readStop() will continue the
+      // loop when it completes (since #reading is now true again).
+      if (!this.#readInFlight) {
+        this.#read();
+      }
     }
 
     return 0;
@@ -162,10 +168,13 @@ export class LibuvStreamWrap extends HandleWrap {
    */
   readStop(): number {
     this.#reading = false;
-    if (this.cancelHandle) {
-      core.close(this.cancelHandle);
-      this.cancelHandle = undefined;
-    }
+    // Note: we intentionally do NOT close the cancel handle here.
+    // Stdin reads use spawn_blocking, which can't be cancelled -- the
+    // blocking read() syscall continues running even after or_cancel()
+    // returns Err(Canceled).  If the syscall completes and consumes a
+    // byte from the fd, that byte is lost because nobody reads the
+    // JoinHandle result.  Instead we let the in-flight read complete
+    // naturally; #read() checks #reading and stops the loop.
 
     return 0;
   }
@@ -346,6 +355,8 @@ export class LibuvStreamWrap extends HandleWrap {
 
   /** Internal method for reading from the attached stream. */
   async #read() {
+    this.#readInFlight = true;
+
     // Queue the read operation and allow TLS upgrades to complete.
     //
     // This is done to ensure that the resource is not locked up by
@@ -358,6 +369,7 @@ export class LibuvStreamWrap extends HandleWrap {
 
     if (this.upgrading) {
       // Starting an upgrade, stop reading. Upgrading will resume reading.
+      this.#readInFlight = false;
       this.readStop();
       return;
     }
@@ -384,7 +396,10 @@ export class LibuvStreamWrap extends HandleWrap {
         return this.#read();
       }
 
-      if (e.message === "cancelled") return null;
+      if (e.message === "cancelled") {
+        this.#readInFlight = false;
+        return null;
+      }
 
       if (
         ObjectPrototypeIsPrototypeOf(Deno.errors.Interrupted.prototype, e) ||
@@ -400,6 +415,7 @@ export class LibuvStreamWrap extends HandleWrap {
       ) {
         nread = MapPrototypeGet(codeMap, "ECONNRESET")!;
       } else {
+        this.#readInFlight = false;
         this[ownerSymbol].destroy(e);
         return;
       }
@@ -425,6 +441,8 @@ export class LibuvStreamWrap extends HandleWrap {
 
     if (nread >= 0 && this.#reading) {
       this.#read();
+    } else {
+      this.#readInFlight = false;
     }
   }
 

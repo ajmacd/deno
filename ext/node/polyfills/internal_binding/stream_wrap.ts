@@ -380,6 +380,9 @@ export class LibuvStreamWrap extends HandleWrap {
         const { cancelHandle, nread: p } = this[kStreamBaseField]!
           [_readWithCancelHandle](buf);
         if (cancelHandle) {
+          if (this.cancelHandle !== undefined) {
+            core.tryClose(this.cancelHandle);
+          }
           this.cancelHandle = cancelHandle;
         }
 

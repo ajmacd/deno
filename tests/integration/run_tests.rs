@@ -1686,7 +1686,6 @@ mod permissions {
 }
 
 #[test(flaky)]
-#[cfg(windows)]
 fn process_stdin_read_unblock() {
   TestContext::default()
     .new_command()
@@ -1694,8 +1693,13 @@ fn process_stdin_read_unblock() {
     .with_pty(|mut console| {
       console.write_raw("b");
       console.human_delay();
-      console.write_line_raw("s");
-      console.expect_all(&["1", "1"]);
+      // Verify the actual character is received, not just the byte count.
+      // Previously on Unix, readStop() closed the cancel handle while a
+      // spawn_blocking read was in-flight, causing the first byte after
+      // resume to be silently dropped (denoland/deno#30747).
+      console.expect("b");
+      console.write_raw("s");
+      console.expect("s");
     });
 }
 
